@@ -1,0 +1,43 @@
+
+================================================================================
+                        VISUAL STARTUP GUIDE
+================================================================================
+
+HOW TO START:
+-------------
+
+Find in root folder:
+    START.bat
+
+Double-click it!
+
+WHAT HAPPENS:
+-------------
+
+[1/3] Checking Node.js...       ✅ Node.js OK
+[2/3] Preparing ports...         ✅ Ports ready
+[3/3] Checking dependencies...   ✅ Dependencies OK
+
+STARTING SERVERS
+
+  Backend:  http://localhost:3001
+  Frontend: http://localhost:3000
+
+  Browser will open automatically...
+
+[Backend starts...]
+[Frontend starts...]
+[Browser opens to http://localhost:3000]
+
+YOU SEE: Dashboard with Holdings/Positions/Margins
+
+DONE! ✅
+
+================================================================================
+
+KEEP THE TERMINAL WINDOW OPEN WHILE USING THE APP!
+
+Press Ctrl+C to stop.
+
+================================================================================
+
