@@ -80,6 +80,40 @@ function isAuthorizationError(error) {
          errorStr.includes('failed to execute');
 }
 
+// Fallback instruments list when MCP search fails
+function getFallbackInstruments(query) {
+  const allInstruments = [
+    // Indices
+    { instrument_token: 256265, tradingsymbol: 'NIFTY 50', name: 'NIFTY 50', exchange: 'NSE' },
+    { instrument_token: 260105, tradingsymbol: 'NIFTY BANK', name: 'NIFTY BANK', exchange: 'NSE' },
+    
+    // Popular Stocks
+    { instrument_token: 738561, tradingsymbol: 'RELIANCE', name: 'Reliance Industries Ltd', exchange: 'NSE' },
+    { instrument_token: 492033, tradingsymbol: 'TCS', name: 'Tata Consultancy Services Ltd', exchange: 'NSE' },
+    { instrument_token: 3861249, tradingsymbol: 'HDFCBANK', name: 'HDFC Bank Ltd', exchange: 'NSE' },
+    { instrument_token: 1270529, tradingsymbol: 'INFY', name: 'Infosys Ltd', exchange: 'NSE' },
+    { instrument_token: 2953217, tradingsymbol: 'ICICIBANK', name: 'ICICI Bank Ltd', exchange: 'NSE' },
+    { instrument_token: 341249, tradingsymbol: 'SBIN', name: 'State Bank of India', exchange: 'NSE' },
+    { instrument_token: 4267265, tradingsymbol: 'BHARTIARTL', name: 'Bharti Airtel Ltd', exchange: 'NSE' },
+    { instrument_token: 2939649, tradingsymbol: 'ITC', name: 'ITC Ltd', exchange: 'NSE' },
+    { instrument_token: 1895937, tradingsymbol: 'KOTAKBANK', name: 'Kotak Mahindra Bank Ltd', exchange: 'NSE' },
+    { instrument_token: 779521, tradingsymbol: 'LT', name: 'Larsen & Toubro Ltd', exchange: 'NSE' },
+    { instrument_token: 60417, tradingsymbol: 'AXISBANK', name: 'Axis Bank Ltd', exchange: 'NSE' },
+    { instrument_token: 2181889, tradingsymbol: 'HINDUNILVR', name: 'Hindustan Unilever Ltd', exchange: 'NSE' },
+    { instrument_token: 1346049, tradingsymbol: 'MARUTI', name: 'Maruti Suzuki India Ltd', exchange: 'NSE' },
+    { instrument_token: 5215745, tradingsymbol: 'TATAMOTORS', name: 'Tata Motors Ltd', exchange: 'NSE' },
+    { instrument_token: 225537, tradingsymbol: 'WIPRO', name: 'Wipro Ltd', exchange: 'NSE' },
+    { instrument_token: 3465729, tradingsymbol: 'TATASTEEL', name: 'Tata Steel Ltd', exchange: 'NSE' },
+    { instrument_token: 2763265, tradingsymbol: 'ASIANPAINT', name: 'Asian Paints Ltd', exchange: 'NSE' }
+  ];
+  
+  const q = query.toLowerCase();
+  return allInstruments.filter(inst => 
+    inst.tradingsymbol.toLowerCase().includes(q) ||
+    inst.name.toLowerCase().includes(q)
+  );
+}
+
 // API Routes
 
 // Health check
@@ -415,7 +449,7 @@ app.get('/api/portfolio/positions', async (req, res) => {
   }
 });
 
-// Get quote for a symbol
+// Get quote for a symbol or instrument token
 app.get('/api/market/quote/:symbol', async (req, res) => {
   try {
     if (!mcpClient) {
@@ -425,9 +459,12 @@ app.get('/api/market/quote/:symbol', async (req, res) => {
     const { symbol } = req.params;
     console.log(`📈 Fetching quote for ${symbol}...`);
     
+    // Try to parse as instrument_token (number) or use as symbol (string)
+    const isToken = !isNaN(parseInt(symbol));
+    
     const result = await mcpClient.callTool({
       name: 'get_quote',
-      arguments: { symbol }
+      arguments: isToken ? { instrument_tokens: [parseInt(symbol)] } : { symbols: [symbol] }
     });
 
     if (result?.isError) {
@@ -438,12 +475,170 @@ app.get('/api/market/quote/:symbol', async (req, res) => {
       });
     }
 
-    res.json({ success: true, data: result });
+    console.log('📦 Quote result:', JSON.stringify(result).substring(0, 300));
+
+    // Parse the response
+    let quoteData = result;
+    
+    if (result?.content && Array.isArray(result.content) && result.content[0]?.text) {
+      try {
+        quoteData = JSON.parse(result.content[0].text);
+      } catch (e) {
+        console.warn('Could not parse quote response as JSON');
+      }
+    }
+
+    // Extract the actual quote data
+    let quote = quoteData;
+    if (quoteData.data) {
+      quote = quoteData.data;
+    }
+    
+    // If it's an object with the token/symbol as key, extract it
+    if (typeof quote === 'object' && !quote.last_price) {
+      const firstKey = Object.keys(quote)[0];
+      if (firstKey && quote[firstKey]) {
+        quote = quote[firstKey];
+      }
+    }
+
+    res.json({ success: true, data: quote });
   } catch (error) {
     console.error('Error fetching quote:', error);
     res.status(500).json({ 
       error: 'Failed to fetch quote', 
       message: error.message 
+    });
+  }
+});
+
+// Get historical OHLC data
+app.get('/api/market/historical/:instrument_token', async (req, res) => {
+  try {
+    if (!mcpClient) {
+      return res.status(503).json({ 
+        error: 'MCP client not initialized',
+        message: 'Backend server is starting up. Please wait and try again.'
+      });
+    }
+
+    const { instrument_token } = req.params;
+    const { interval = 'day', from, to } = req.query;
+    
+    console.log(`📊 Fetching historical data for instrument ${instrument_token}...`);
+    console.log(`📅 From: ${from}, To: ${to}, Interval: ${interval}`);
+    
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Request timed out')), 30000);
+    });
+    
+    const historicalPromise = mcpClient.callTool({
+      name: 'get_historical_data',
+      arguments: {
+        instrument_token: parseInt(instrument_token),
+        from_date: from,
+        to_date: to,
+        interval: interval
+      }
+    });
+    
+    const result = await Promise.race([historicalPromise, timeoutPromise]);
+
+    console.log('📦 MCP Response structure:', JSON.stringify(result).substring(0, 200));
+
+    if (result?.isError || (result?.content && result.content[0]?.text?.includes('Failed'))) {
+      console.error('⚠️  MCP returned error or failed message');
+      const errorMessage = result?.content?.[0]?.text || 'Historical data not available';
+      console.error('Error content:', errorMessage);
+      console.error('Full MCP error result:', JSON.stringify(result, null, 2));
+      
+      // Check if it's an authorization error
+      const needsAuth = errorMessage.toLowerCase().includes('authorization') || 
+                        errorMessage.toLowerCase().includes('auth') ||
+                        errorMessage.toLowerCase().includes('login');
+      
+      return res.status(needsAuth ? 401 : 400).json({ 
+        success: false,
+        error: 'Data unavailable',
+        message: `Unable to fetch historical data: ${errorMessage}`,
+        instrument_token,
+        interval,
+        needsAuth,
+        mcpError: errorMessage
+      });
+    }
+
+    // Parse MCP response - it might be in content[0].text as JSON string
+    let parsedData = result;
+    
+    console.log('📦 Raw MCP result type:', typeof result);
+    console.log('📦 Raw MCP result keys:', Object.keys(result || {}));
+    console.log('📦 Has content array?', result?.content ? 'yes' : 'no');
+    
+    if (result?.content && Array.isArray(result.content) && result.content[0]?.text) {
+      try {
+        const textContent = result.content[0].text;
+        console.log('📝 MCP text content (first 500 chars):', textContent.substring(0, 500));
+        parsedData = JSON.parse(textContent);
+        console.log('✅ Parsed MCP text content successfully');
+        console.log('📦 Parsed data keys:', Object.keys(parsedData || {}));
+      } catch (e) {
+        console.warn('⚠️ Could not parse MCP content as JSON:', e.message);
+        console.log('📝 Raw text content:', result.content[0].text.substring(0, 200));
+      }
+    }
+
+    // Try to extract candles from various possible locations
+    let candles = null;
+    
+    if (parsedData.candles && Array.isArray(parsedData.candles)) {
+      candles = parsedData.candles;
+      console.log(`✅ Found candles array (${candles.length} candles) at parsedData.candles`);
+    } else if (parsedData.data?.candles && Array.isArray(parsedData.data.candles)) {
+      candles = parsedData.data.candles;
+      console.log(`✅ Found candles array (${candles.length} candles) at parsedData.data.candles`);
+    } else if (Array.isArray(parsedData)) {
+      candles = parsedData;
+      console.log(`✅ parsedData is array (${candles.length} items)`);
+    } else {
+      console.error('❌ Could not find candles in response!');
+      console.error('Parsed data structure:', JSON.stringify(parsedData, null, 2).substring(0, 500));
+      
+      return res.status(500).json({
+        error: 'Invalid data structure from MCP',
+        message: 'Could not extract candles from MCP response',
+        receivedKeys: Object.keys(parsedData || {}),
+        sample: JSON.stringify(parsedData).substring(0, 200)
+      });
+    }
+
+    console.log('✅ Historical data fetched successfully');
+    
+    // Return in a consistent format
+    res.json({ 
+      success: true, 
+      data: {
+        candles: candles
+      }
+    });
+  } catch (error) {
+    console.error('❌ Error fetching historical data:', error.message);
+    console.error('Error stack:', error.stack);
+    console.error('Request details:', {
+      instrument_token,
+      interval,
+      from,
+      to
+    });
+    
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to fetch historical data', 
+      message: error.message || 'Unknown error occurred',
+      details: error.toString(),
+      instrument_token,
+      interval,
+      requestParams: { from, to }
     });
   }
 });
@@ -496,6 +691,114 @@ app.get('/api/account/margins', async (req, res) => {
     
     res.status(500).json({ 
       error: 'Failed to fetch margins', 
+      message: error.message 
+    });
+  }
+});
+
+// Search instruments from Zerodha
+app.get('/api/instruments/search', async (req, res) => {
+  try {
+    if (!mcpClient) {
+      return res.status(503).json({ 
+        error: 'MCP client not initialized',
+        message: 'Backend server is starting up. Please wait and try again.'
+      });
+    }
+
+    const { q } = req.query; // Search query
+    
+    if (!q || q.length < 2) {
+      return res.json({ success: true, instruments: [] });
+    }
+
+    // Clean up the query - remove extra spaces and prepare for search
+    const cleanQuery = q.trim().toUpperCase();
+    console.log(`🔍 Searching instruments for: "${cleanQuery}"`);
+    
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Search timed out')), 10000);
+    });
+    
+    let result;
+    try {
+      // Try the search with the original query
+      const searchPromise = mcpClient.callTool({
+        name: 'search_instruments',
+        arguments: {
+          query: cleanQuery
+        }
+      });
+      
+      result = await Promise.race([searchPromise, timeoutPromise]);
+    } catch (searchError) {
+      console.error('⚠️  MCP search failed:', searchError.message);
+      
+      // Return fallback popular instruments if search fails
+      const fallbackInstruments = getFallbackInstruments(cleanQuery);
+      if (fallbackInstruments.length > 0) {
+        console.log(`💡 Using fallback: ${fallbackInstruments.length} instruments`);
+        return res.json({ 
+          success: true, 
+          instruments: fallbackInstruments, 
+          query: cleanQuery,
+          fallback: true 
+        });
+      }
+      
+      throw searchError;
+    }
+
+    if (result?.isError) {
+      console.error('⚠️  Instrument search error');
+      return res.status(401).json({ 
+        error: 'Authorization required or search failed',
+        needsAuth: true,
+        data: result
+      });
+    }
+
+    // Parse instruments from response
+    let instruments = [];
+    if (result?.content && Array.isArray(result.content)) {
+      const content = result.content[0];
+      if (content?.type === 'text' && content.text) {
+        try {
+          instruments = JSON.parse(content.text);
+          console.log(`✅ Found ${instruments.length} instruments for "${cleanQuery}"`);
+          
+          // Sort results: Exact matches first, then by relevance
+          instruments.sort((a, b) => {
+            const aSymbol = a.tradingsymbol || '';
+            const bSymbol = b.tradingsymbol || '';
+            const aStartsWith = aSymbol.toUpperCase().startsWith(cleanQuery);
+            const bStartsWith = bSymbol.toUpperCase().startsWith(cleanQuery);
+            
+            if (aStartsWith && !bStartsWith) return -1;
+            if (!aStartsWith && bStartsWith) return 1;
+            
+            // If both options, sort by expiry and strike
+            if (a.instrument_type && b.instrument_type) {
+              if (a.expiry !== b.expiry) {
+                return new Date(a.expiry) - new Date(b.expiry);
+              }
+              return (a.strike || 0) - (b.strike || 0);
+            }
+            
+            return 0;
+          });
+        } catch (e) {
+          console.error('Failed to parse instruments:', e);
+          console.log('Raw response:', content.text?.substring(0, 500));
+        }
+      }
+    }
+
+    res.json({ success: true, instruments, query: cleanQuery });
+  } catch (error) {
+    console.error('❌ Error searching instruments:', error.message);
+    res.status(500).json({ 
+      error: 'Failed to search instruments', 
       message: error.message 
     });
   }
@@ -575,8 +878,12 @@ async function startServer() {
       console.log('   GET  /api/market/quote/:symbol');
       console.log('   GET  /api/market/historical/:instrument_token');
       console.log('   GET  /api/account/margins');
+      console.log('   GET  /api/instruments/search?q=<query>');
       console.log('   GET  /api/mcp/tools');
-      console.log('   GET  /api/diagnostic\n');
+      console.log('   GET  /api/diagnostic');
+      console.log('\n🔄 Live Updates:');
+      console.log('   Holdings, Positions, Margins: Auto-refresh every 30s');
+      console.log('   Charts: Auto-refresh every 60s\n');
     });
   } catch (error) {
     console.error('❌ Failed to start server:', error);
