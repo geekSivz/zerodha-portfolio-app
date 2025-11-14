@@ -2245,39 +2245,10 @@ export default function CandlestickChart({ initialStock, onBack }) {
                       setIsClickingSignal(true);
                       setIsDragging(false);
                     }}
-                    onMouseEnter={(e) => {
-                      e.stopPropagation();
-                      setIsHoveringSignal(true);
-                      setIsDragging(false);
-                      // Only show hover tooltip if not already pinned
-                      if (!pinnedSignal || pinnedSignal.signal.index !== signal.index) {
-                        const boundingRect = e.currentTarget.getBoundingClientRect();
-                        setHoveredSignal({
-                          signal,
-                          x: boundingRect.left + boundingRect.width / 2,
-                          y: boundingRect.top - 10,
-                          type: 'BUY',
-                          spotPrice: signal.price
-                        });
-                      }
-                    }}
-                    onMouseLeave={(e) => {
-                      // Only clear if not moving to tooltip and not pinned
-                      const relatedTarget = e.relatedTarget;
-                      if (!relatedTarget || !relatedTarget.closest || !relatedTarget.closest('.option-tooltip')) {
-                        setIsHoveringSignal(false);
-                        // Delay clearing to allow moving to tooltip
-                        setTimeout(() => {
-                          if (!document.querySelector('.option-tooltip:hover') && (!pinnedSignal || pinnedSignal.signal.index !== signal.index)) {
-                            setHoveredSignal(null);
-                          }
-                        }, 100);
-                      }
-                    }}
                     onClick={(e) => {
                       e.stopPropagation();
                       e.preventDefault();
-                      // Pin the tooltip when clicked
+                      // Show tooltip when clicked
                       const boundingRect = e.currentTarget.getBoundingClientRect();
                       setPinnedSignal({
                         signal,
@@ -2371,39 +2342,10 @@ export default function CandlestickChart({ initialStock, onBack }) {
                       e.preventDefault();
                       setIsDragging(false);
                     }}
-                    onMouseEnter={(e) => {
-                      e.stopPropagation();
-                      setIsHoveringSignal(true);
-                      setIsDragging(false);
-                      // Only show hover tooltip if not already pinned
-                      if (!pinnedSignal || pinnedSignal.signal.index !== signal.index) {
-                        const boundingRect = e.currentTarget.getBoundingClientRect();
-                        setHoveredSignal({
-                          signal,
-                          x: boundingRect.left + boundingRect.width / 2,
-                          y: boundingRect.top - 10,
-                          type: 'SELL',
-                          spotPrice: signal.price
-                        });
-                      }
-                    }}
-                    onMouseLeave={(e) => {
-                      // Only clear if not moving to tooltip and not pinned
-                      const relatedTarget = e.relatedTarget;
-                      if (!relatedTarget || !relatedTarget.closest || !relatedTarget.closest('.option-tooltip')) {
-                        setIsHoveringSignal(false);
-                        // Delay clearing to allow moving to tooltip
-                        setTimeout(() => {
-                          if (!document.querySelector('.option-tooltip:hover') && (!pinnedSignal || pinnedSignal.signal.index !== signal.index)) {
-                            setHoveredSignal(null);
-                          }
-                        }, 100);
-                      }
-                    }}
                     onClick={(e) => {
                       e.stopPropagation();
                       e.preventDefault();
-                      // Pin the tooltip when clicked
+                      // Show tooltip when clicked
                       const boundingRect = e.currentTarget.getBoundingClientRect();
                       setPinnedSignal({
                         signal,
@@ -3550,31 +3492,9 @@ export default function CandlestickChart({ initialStock, onBack }) {
                               cursor: 'pointer',
                               transition: 'none', // No transition for smooth following
                             }}
-                            onMouseEnter={(e) => {
-                              const boundingRect = e.currentTarget.getBoundingClientRect();
-                              // Only show hover tooltip if not already pinned
-                              if (!pinnedSignal || pinnedSignal.signal.index !== signal.index) {
-                                setHoveredSignal({
-                                  signal,
-                                  x: boundingRect.left + boundingRect.width / 2,
-                                  y: boundingRect.top - 10,
-                                  type: signal.type,
-                                  spotPrice: signal.price
-                                });
-                              }
-                              setIsHoveringSignal(true);
-                            }}
-                            onMouseLeave={() => {
-                              setIsHoveringSignal(false);
-                              setTimeout(() => {
-                                if (!document.querySelector('.option-tooltip:hover') && (!pinnedSignal || pinnedSignal.signal.index !== signal.index)) {
-                                  setHoveredSignal(null);
-                                }
-                              }, 100);
-                            }}
                             onClick={(e) => {
                               e.stopPropagation();
-                              // Pin the tooltip when clicked
+                              // Show tooltip when clicked
                               const boundingRect = e.currentTarget.getBoundingClientRect();
                               setPinnedSignal({
                                 signal,
@@ -3773,56 +3693,45 @@ export default function CandlestickChart({ initialStock, onBack }) {
         </div>
       )}
 
-      {/* Hover/Pinned Tooltip for Option Recommendations */}
-      {(hoveredSignal || pinnedSignal) && (() => {
-        const currentSignal = pinnedSignal || hoveredSignal;
+      {/* Click Tooltip for Option Recommendations */}
+      {pinnedSignal && (() => {
         return (
           <div 
             className="option-tooltip fixed bg-white border-2 border-blue-400 rounded-lg shadow-2xl z-[100] p-4 max-w-md"
             style={{
-              left: `${currentSignal.x + 20}px`,
-              top: `${currentSignal.y - 100}px`,
+              left: `${pinnedSignal.x + 20}px`,
+              top: `${pinnedSignal.y - 100}px`,
               transform: 'translateX(-50%)',
               pointerEvents: 'auto',
               maxHeight: '500px',
               overflowY: 'auto'
             }}
-            onMouseEnter={(e) => {
-              e.stopPropagation();
-              setIsHoveringSignal(true);
-            }}
-            onMouseLeave={() => {
-              // Only hide if it's not pinned
-              if (!pinnedSignal) {
-                setIsHoveringSignal(false);
-                setHoveredSignal(null);
-              }
-            }}
           >
-            <div className="flex items-center justify-between mb-3 pb-2 border-b border-gray-200">
+            {/* Close Button */}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setPinnedSignal(null);
+                setHoveredSignal(null);
+              }}
+              className="absolute top-2 right-2 w-6 h-6 flex items-center justify-center bg-red-500 hover:bg-red-600 text-white rounded-full text-xs font-bold transition-colors"
+              title="Close"
+            >
+              ×
+            </button>
+            <div className="flex items-center justify-between mb-3 pb-2 border-b border-gray-200 pr-8">
               <h4 className="font-bold text-sm text-gray-800" style={{fontFamily: 'Poppins, sans-serif'}}>
-                {currentSignal.type === 'BUY' ? '↑ BUY Signal - CE Options' : '↓ SELL Signal - PE Options'}
-                {pinnedSignal && <span className="ml-2 text-xs text-blue-600 font-normal">(Pinned)</span>}
+                {pinnedSignal.type === 'BUY' ? '↑ BUY Signal - CE Options' : '↓ SELL Signal - PE Options'}
               </h4>
-              <button
-                onClick={() => {
-                  setPinnedSignal(null);
-                  setHoveredSignal(null);
-                }}
-                className="text-gray-400 hover:text-gray-600 text-lg font-bold"
-                title="Close"
-              >
-                ✕
-              </button>
             </div>
             
             <div className="mb-2 text-xs text-gray-600">
-              <div>Spot Price: <span className="font-semibold text-gray-800">₹{currentSignal.spotPrice.toFixed(2)}</span></div>
-              <div>Date: <span className="font-semibold">{new Date(currentSignal.signal.date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}</span></div>
+              <div>Spot Price: <span className="font-semibold text-gray-800">₹{pinnedSignal.spotPrice.toFixed(2)}</span></div>
+              <div>Date: <span className="font-semibold">{new Date(pinnedSignal.signal.date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}</span></div>
             </div>
 
             {(() => {
-              const recommendations = calculateOptionRecommendations(currentSignal.spotPrice, currentSignal.type === 'BUY' ? 'CE' : 'PE');
+              const recommendations = calculateOptionRecommendations(pinnedSignal.spotPrice, pinnedSignal.type === 'BUY' ? 'CE' : 'PE');
             const weeklyOptions = recommendations.filter(r => r.expiry === 'Weekly');
             const monthlyOptions = recommendations.filter(r => r.expiry === 'Monthly');
             
@@ -3881,8 +3790,7 @@ export default function CandlestickChart({ initialStock, onBack }) {
                             />
                             <button
                               onClick={() => {
-                                const currentSignal = pinnedSignal || hoveredSignal;
-                                handlePlaceOrder(opt, expiryName, quantity, currentSignal.signal, 'BUY');
+                                handlePlaceOrder(opt, expiryName, quantity, pinnedSignal.signal, 'BUY');
                               }}
                               className="flex-1 px-3 py-1.5 bg-green-600 text-white text-xs font-bold rounded hover:bg-green-700 transition-colors"
                             >
@@ -3890,8 +3798,7 @@ export default function CandlestickChart({ initialStock, onBack }) {
                             </button>
                             <button
                               onClick={() => {
-                                const currentSignal = pinnedSignal || hoveredSignal;
-                                handlePlaceOrder(opt, expiryName, quantity, currentSignal.signal, 'SELL');
+                                handlePlaceOrder(opt, expiryName, quantity, pinnedSignal.signal, 'SELL');
                               }}
                               className="flex-1 px-3 py-1.5 bg-red-600 text-white text-xs font-bold rounded hover:bg-red-700 transition-colors"
                             >
@@ -3957,8 +3864,7 @@ export default function CandlestickChart({ initialStock, onBack }) {
                             />
                             <button
                               onClick={() => {
-                                const currentSignal = pinnedSignal || hoveredSignal;
-                                handlePlaceOrder(opt, expiryName, quantity, currentSignal.signal, 'BUY');
+                                handlePlaceOrder(opt, expiryName, quantity, pinnedSignal.signal, 'BUY');
                               }}
                               className="flex-1 px-3 py-1.5 bg-green-600 text-white text-xs font-bold rounded hover:bg-green-700 transition-colors"
                             >
@@ -3966,8 +3872,7 @@ export default function CandlestickChart({ initialStock, onBack }) {
                             </button>
                             <button
                               onClick={() => {
-                                const currentSignal = pinnedSignal || hoveredSignal;
-                                handlePlaceOrder(opt, expiryName, quantity, currentSignal.signal, 'SELL');
+                                handlePlaceOrder(opt, expiryName, quantity, pinnedSignal.signal, 'SELL');
                               }}
                               className="flex-1 px-3 py-1.5 bg-red-600 text-white text-xs font-bold rounded hover:bg-red-700 transition-colors"
                             >
@@ -3984,7 +3889,7 @@ export default function CandlestickChart({ initialStock, onBack }) {
           })()}
 
           <div className="mt-3 pt-2 border-t border-gray-200 text-xs text-gray-500">
-              💡 {pinnedSignal ? 'Click ✕ to close' : 'Click signal to pin tooltip • Hover to see details'}
+              💡 Click the ✕ button to close this tooltip
             </div>
           </div>
         );
