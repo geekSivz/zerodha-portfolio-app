@@ -80,6 +80,93 @@ function isAuthorizationError(error) {
          errorStr.includes('failed to execute');
 }
 
+// Check if error is session related (session expired/invalid)
+function isSessionError(error) {
+  const errorStr = error?.message?.toLowerCase() || '';
+  const errorCode = error?.code;
+  return errorStr.includes('invalid session') || 
+         errorStr.includes('session id') ||
+         errorStr.includes('session expired') ||
+         errorStr.includes('session invalid') ||
+         (errorCode && errorCode === -32603); // Internal error often indicates session issues
+}
+
+// Reconnect MCP when session expires
+async function reconnectMCP() {
+  console.log('\n🔄 Reconnecting MCP due to session error...');
+  try {
+    // Close existing connection
+    if (mcpClient) {
+      try {
+        await mcpClient.close();
+      } catch (e) {
+        // Ignore errors when closing
+      }
+      mcpClient = null;
+    }
+    
+    // Small delay before reconnecting
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    // Reinitialize
+    const reconnected = await initializeMCP();
+    if (reconnected) {
+      console.log('✅ MCP reconnected successfully');
+      return true;
+    } else {
+      console.error('❌ Failed to reconnect MCP');
+      return false;
+    }
+  } catch (error) {
+    console.error('❌ Error reconnecting MCP:', error.message);
+    return false;
+  }
+}
+
+// Safe MCP call wrapper that handles session errors
+async function safeMCPCall(callFunction, maxRetries = 1) {
+  let lastError = null;
+  
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      if (!mcpClient) {
+        console.warn('⚠️ MCP client not initialized, attempting to initialize...');
+        await initializeMCP();
+        if (!mcpClient) {
+          throw new Error('MCP client initialization failed');
+        }
+      }
+      
+      return await callFunction();
+    } catch (error) {
+      lastError = error;
+      const errorMessage = error?.message || '';
+      
+      // Check if it's a session error
+      if (isSessionError(error) && attempt < maxRetries) {
+        console.warn(`⚠️ Session error detected (attempt ${attempt + 1}/${maxRetries + 1}): ${errorMessage}`);
+        console.log('🔄 Attempting to reconnect MCP...');
+        
+        // Reconnect MCP
+        const reconnected = await reconnectMCP();
+        if (reconnected) {
+          // Wait a bit before retrying
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          continue; // Retry the call
+        } else {
+          throw new Error('Failed to reconnect MCP after session error');
+        }
+      }
+      
+      // If not a session error or retries exhausted, throw the error
+      throw error;
+    }
+  }
+  
+  // Should not reach here, but just in case
+  throw lastError || new Error('MCP call failed after retries');
+}
+
 // Fallback instruments list when MCP search fails
 function getFallbackInstruments(query) {
   const allInstruments = [
@@ -313,21 +400,23 @@ app.get('/api/portfolio/holdings', async (req, res) => {
     console.log('🔐 Current authorization status:', authorizationComplete);
     console.log('⏰ Timestamp:', new Date().toISOString());
     
-    // Increase timeout to 45 seconds (MCP calls can be slow)
-    const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('Request timed out after 45 seconds')), 45000);
-    });
-    
-    const holdingsPromise = mcpClient.callTool({
-      name: 'get_holdings',
-      arguments: {}
-    });
-    
-    console.log('⏳ Waiting for MCP response... (max 45 seconds)');
-    
+    // Use safeMCPCall to handle session errors
     let result;
     try {
-      result = await Promise.race([holdingsPromise, timeoutPromise]);
+      result = await safeMCPCall(async () => {
+        // Increase timeout to 45 seconds (MCP calls can be slow)
+        const timeoutPromise = new Promise((_, reject) => {
+          setTimeout(() => reject(new Error('Request timed out after 45 seconds')), 45000);
+        });
+        
+        const holdingsPromise = mcpClient.callTool({
+          name: 'get_holdings',
+          arguments: {}
+        });
+        
+        console.log('⏳ Waiting for MCP response... (max 45 seconds)');
+        return await Promise.race([holdingsPromise, timeoutPromise]);
+      });
     } catch (timeoutError) {
       console.error('⏱️  Request timed out:', timeoutError.message);
       return res.status(504).json({ 
@@ -407,17 +496,20 @@ app.get('/api/portfolio/positions', async (req, res) => {
 
     console.log('💼 Fetching positions...');
     
-    // Add timeout wrapper
-    const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('Request timed out after 30 seconds')), 30000);
+    // Use safeMCPCall to handle session errors
+    const result = await safeMCPCall(async () => {
+      // Add timeout wrapper
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Request timed out after 30 seconds')), 30000);
+      });
+      
+      const positionsPromise = mcpClient.callTool({
+        name: 'get_positions',
+        arguments: {}
+      });
+      
+      return await Promise.race([positionsPromise, timeoutPromise]);
     });
-    
-    const positionsPromise = mcpClient.callTool({
-      name: 'get_positions',
-      arguments: {}
-    });
-    
-    const result = await Promise.race([positionsPromise, timeoutPromise]);
 
     if (result?.isError || (result?.content && result.content[0]?.text?.includes('Failed'))) {
       console.error('⚠️  Authorization required or expired');
@@ -457,52 +549,74 @@ app.get('/api/market/quote/:symbol', async (req, res) => {
     }
 
     const { symbol } = req.params;
-    console.log(`📈 Fetching quote for ${symbol}...`);
     
     // Try to parse as instrument_token (number) or use as symbol (string)
     const isToken = !isNaN(parseInt(symbol));
     
-    const result = await mcpClient.callTool({
-      name: 'get_quote',
-      arguments: isToken ? { instrument_tokens: [parseInt(symbol)] } : { symbols: [symbol] }
-    });
-
-    if (result?.isError) {
-      return res.status(401).json({ 
-        error: 'Authorization required',
-        needsAuth: true,
-        data: result
+    try {
+      const result = await safeMCPCall(async () => {
+        return await mcpClient.callTool({
+          name: 'get_quote',
+          arguments: isToken ? { instrument_tokens: [parseInt(symbol)] } : { symbols: [symbol] }
+        });
       });
-    }
 
-    console.log('📦 Quote result:', JSON.stringify(result).substring(0, 300));
-
-    // Parse the response
-    let quoteData = result;
-    
-    if (result?.content && Array.isArray(result.content) && result.content[0]?.text) {
-      try {
-        quoteData = JSON.parse(result.content[0].text);
-      } catch (e) {
-        console.warn('Could not parse quote response as JSON');
+      if (result?.isError) {
+        return res.status(401).json({ 
+          error: 'Authorization required',
+          needsAuth: true,
+          data: result
+        });
       }
-    }
 
-    // Extract the actual quote data
-    let quote = quoteData;
-    if (quoteData.data) {
-      quote = quoteData.data;
-    }
-    
-    // If it's an object with the token/symbol as key, extract it
-    if (typeof quote === 'object' && !quote.last_price) {
-      const firstKey = Object.keys(quote)[0];
-      if (firstKey && quote[firstKey]) {
-        quote = quote[firstKey];
+      console.log('📦 Quote result:', JSON.stringify(result).substring(0, 300));
+
+      // Parse the response
+      let quoteData = result;
+      
+      if (result?.content && Array.isArray(result.content) && result.content[0]?.text) {
+        try {
+          quoteData = JSON.parse(result.content[0].text);
+        } catch (e) {
+          console.warn('Could not parse quote response as JSON');
+        }
       }
-    }
 
-    res.json({ success: true, data: quote });
+      // Extract the actual quote data
+      let quote = quoteData;
+      if (quoteData.data) {
+        quote = quoteData.data;
+      }
+      
+      // If it's an object with the token/symbol as key, extract it
+      if (typeof quote === 'object' && !quote.last_price) {
+        const firstKey = Object.keys(quote)[0];
+        if (firstKey && quote[firstKey]) {
+          quote = quote[firstKey];
+        }
+      }
+
+      return res.json({ success: true, data: quote });
+    } catch (toolError) {
+      // Check if it's a "tool not found" error
+      const errorMessage = toolError.message || '';
+      const errorCode = toolError.code;
+      
+      if (errorCode === -32602 || 
+          errorMessage.includes('tool not found') || 
+          errorMessage.includes("tool 'get_quote' not found")) {
+        // Tool is not available - return gracefully without error log
+        return res.status(200).json({
+          success: false,
+          error: 'Tool not available',
+          message: 'get_quote tool is not available in MCP. Please use latest candle close price.',
+          toolUnavailable: true
+        });
+      }
+      
+      // For other errors, log and return error
+      throw toolError; // Re-throw to be caught by outer catch
+    }
   } catch (error) {
     console.error('Error fetching quote:', error);
     res.status(500).json({ 
@@ -523,50 +637,318 @@ app.get('/api/market/historical/:instrument_token', async (req, res) => {
     }
 
     const { instrument_token } = req.params;
-    const { interval = 'day', from, to } = req.query;
+    let { interval = 'day', from, to } = req.query;
+    
+    // Decode URL-encoded parameters (they come encoded from client)
+    try {
+      if (from) from = decodeURIComponent(from);
+      if (to) to = decodeURIComponent(to);
+      if (interval) interval = decodeURIComponent(interval);
+    } catch (decodeError) {
+      console.error('❌ Error decoding URL parameters:', decodeError);
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid URL encoding',
+        message: 'Failed to decode URL parameters',
+        error: decodeError.message
+      });
+    }
+    
+    // Validate date format: should be "YYYY-MM-DD HH:MM:SS"
+    if (from && !from.match(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid date format',
+        message: 'from_date must be in format YYYY-MM-DD HH:MM:SS',
+        received: from
+      });
+    }
+    if (to && !to.match(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid date format',
+        message: 'to_date must be in format YYYY-MM-DD HH:MM:SS',
+        received: to
+      });
+    }
     
     console.log(`📊 Fetching historical data for instrument ${instrument_token}...`);
     console.log(`📅 From: ${from}, To: ${to}, Interval: ${interval}`);
     
-    const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('Request timed out')), 30000);
-    });
+    // Map problematic intervals to fallback intervals
+    const intervalMap = {
+      '240minute': ['60minute', '1h', 'hour', '30minute', '15minute', '5minute', 'day'], // 4h not supported, try hourly, smaller, or daily
+      '4h': ['240minute', '60minute', '1h', 'hour', '30minute', '15minute', '5minute', 'day'], // Alias for 240minute
+      'month': ['day', '1D', 'week', '60minute', '1h', 'hour', '30minute'], // Monthly not supported, try daily, weekly, or hourly
+      'monthly': ['month', 'day', '1D', 'week', '60minute', '1h', 'hour', '30minute'] // Alternative spelling
+    };
     
-    const historicalPromise = mcpClient.callTool({
-      name: 'get_historical_data',
-      arguments: {
-        instrument_token: parseInt(instrument_token),
-        from_date: from,
-        to_date: to,
-        interval: interval
+    // Get fallback intervals for the requested interval
+    const fallbackIntervals = intervalMap[interval] || [];
+    const intervalsToTry = fallbackIntervals.length > 0 ? [interval, ...fallbackIntervals] : [interval];
+    
+    console.log(`🔄 Will try intervals in order: ${intervalsToTry.join(' → ')}`);
+    
+    let result = null;
+    let lastError = null;
+    let usedInterval = interval;
+    
+    // Try intervals in order: original, then fallbacks
+    for (const tryInterval of intervalsToTry) {
+      try {
+        console.log(`📊 Trying interval: ${tryInterval}...`);
+        
+        // Use safeMCPCall to handle session errors
+        result = await safeMCPCall(async () => {
+          const timeoutPromise = new Promise((_, reject) => {
+            setTimeout(() => reject(new Error('Request timed out')), 30000);
+          });
+          
+          const historicalPromise = mcpClient.callTool({
+            name: 'get_historical_data',
+            arguments: {
+              instrument_token: parseInt(instrument_token),
+              from_date: from,
+              to_date: to,
+              interval: tryInterval
+            }
+          });
+          
+          return await Promise.race([historicalPromise, timeoutPromise]);
+        });
+        
+        // Check if result has error
+        if (result?.isError) {
+          const errorMsg = result?.content?.[0]?.text || 'MCP returned error';
+          
+          // Check if it's an authorization error - return immediately, don't try fallbacks
+          const errorMsgLower = errorMsg.toLowerCase();
+          if (errorMsgLower.includes('log in') || errorMsgLower.includes('login') || 
+              errorMsgLower.includes('authorization') || errorMsgLower.includes('authorize') ||
+              errorMsgLower.includes('unauthorized') || errorMsgLower.includes('auth') ||
+              errorMsgLower.includes('please log') || errorMsgLower.includes('login tool')) {
+            console.error(`🔒 Authorization error detected: ${errorMsg}`);
+            return res.status(401).json({
+              success: false,
+              error: 'Authorization required',
+              message: 'Please login to Zerodha to access historical data.',
+              needsAuth: true,
+              originalInterval: interval,
+              mcpError: errorMsg
+            });
+          }
+          
+          console.warn(`⚠️ Interval ${tryInterval} failed: ${errorMsg}`);
+          lastError = errorMsg;
+          continue; // Try next interval
+        }
+        
+        // Check if result content indicates failure
+        if (result?.content && Array.isArray(result.content) && result.content[0]?.text) {
+          const textContent = result.content[0].text;
+          const textContentLower = textContent.toLowerCase();
+          
+          // Check if it's an authorization error - return immediately, don't try fallbacks
+          if (textContentLower.includes('log in') || textContentLower.includes('login') || 
+              textContentLower.includes('authorization') || textContentLower.includes('authorize') ||
+              textContentLower.includes('unauthorized') || textContentLower.includes('auth') ||
+              textContentLower.includes('please log') || textContentLower.includes('login tool')) {
+            console.error(`🔒 Authorization error detected: ${textContent}`);
+            return res.status(401).json({
+              success: false,
+              error: 'Authorization required',
+              message: 'Please login to Zerodha to access historical data.',
+              needsAuth: true,
+              originalInterval: interval,
+              mcpError: textContent
+            });
+          }
+          
+          if (textContent.includes('Failed') || textContent.includes('failed') || 
+              textContent.includes('error') || textContent.includes('Error') ||
+              textContent.includes('not supported') || textContent.includes('not available')) {
+            console.warn(`⚠️ Interval ${tryInterval} returned error: ${textContent.substring(0, 100)}`);
+            lastError = textContent;
+            continue; // Try next interval
+          }
+        }
+        
+        // Check if we have actual data
+        let hasData = false;
+        if (result?.content && Array.isArray(result.content) && result.content[0]?.text) {
+          try {
+            const parsed = JSON.parse(result.content[0].text);
+            hasData = parsed?.candles?.length > 0 || 
+                     parsed?.data?.candles?.length > 0 || 
+                     (Array.isArray(parsed) && parsed.length > 0);
+          } catch (e) {
+            // Not JSON, check if it's an array directly
+            hasData = Array.isArray(result) && result.length > 0;
+          }
+        } else if (Array.isArray(result)) {
+          hasData = result.length > 0;
+        }
+        
+        if (hasData) {
+          usedInterval = tryInterval;
+          console.log(`✅ Successfully using interval: ${tryInterval}${tryInterval !== interval ? ` (original: ${interval})` : ''}`);
+          break; // Success! Exit loop
+        } else {
+          console.warn(`⚠️ Interval ${tryInterval} returned no data`);
+          lastError = 'No data returned';
+          continue; // Try next interval
+        }
+      } catch (error) {
+        console.warn(`⚠️ Interval ${tryInterval} threw error: ${error.message}`);
+        lastError = error.message;
+        continue; // Try next interval
       }
-    });
+    }
     
-    const result = await Promise.race([historicalPromise, timeoutPromise]);
+    // If all intervals failed, check if it's an authorization error
+    if (!result || result?.isError || lastError) {
+      const allTried = intervalsToTry.join(', ');
+      const finalError = lastError || 'Unknown error';
+      const finalErrorLower = finalError.toLowerCase();
+      
+      // Check if the final error is an authorization error
+      if (finalErrorLower.includes('log in') || finalErrorLower.includes('login') || 
+          finalErrorLower.includes('authorization') || finalErrorLower.includes('authorize') ||
+          finalErrorLower.includes('unauthorized') || finalErrorLower.includes('auth') ||
+          finalErrorLower.includes('please log') || finalErrorLower.includes('login tool')) {
+        console.error(`🔒 Authorization error detected: ${finalError}`);
+        return res.status(401).json({
+          success: false,
+          error: 'Authorization required',
+          message: 'Please login to Zerodha to access historical data.',
+          needsAuth: true,
+          originalInterval: interval,
+          triedIntervals: intervalsToTry,
+          mcpError: finalError
+        });
+      }
+      
+      // Try emergency fallback: smaller date range with common intervals
+      // Sometimes the date range is too large, causing all intervals to fail
+      if (finalErrorLower.includes('failed to get historical data') || 
+          finalErrorLower.includes('not available') ||
+          finalErrorLower.includes('no data')) {
+        
+        console.log(`🆘 Trying emergency fallback: Smaller date range with common intervals...`);
+        
+        try {
+          // Parse original dates
+          const originalFromDate = new Date(from);
+          const originalToDate = new Date(to);
+          
+          // Try with progressively smaller date ranges: 7 days, 3 days, 1 day
+          const smallerRanges = [7, 3, 1];
+          const emergencyIntervals = ['day', '1D', '60minute', '1h', 'hour', '30minute', '15minute', '5minute', '3minute', 'minute'];
+          
+          let emergencySuccess = false;
+          
+          rangeLoop: for (const daysBack of smallerRanges) {
+            const emergencyToDate = new Date(originalToDate);
+            const emergencyFromDate = new Date(emergencyToDate);
+            emergencyFromDate.setDate(emergencyFromDate.getDate() - daysBack);
+            
+            // Format dates as YYYY-MM-DD HH:MM:SS
+            const emergencyFrom = emergencyFromDate.toISOString().split('T')[0] + ' 00:00:00';
+            const emergencyTo = emergencyToDate.toISOString().split('T')[0] + ' 23:59:59';
+            
+            console.log(`🆘 Trying ${daysBack} days range: ${emergencyFrom} to ${emergencyTo}`);
+            
+            for (const emergencyInterval of emergencyIntervals) {
+              // Skip if we already tried this interval
+              if (intervalsToTry.includes(emergencyInterval)) continue;
+              
+              try {
+                console.log(`🆘 Trying emergency: ${daysBack} days with interval ${emergencyInterval}...`);
+                
+                // Use safeMCPCall for emergency fallback too
+                const emergencyResult = await safeMCPCall(async () => {
+                  const timeoutPromise = new Promise((_, reject) => {
+                    setTimeout(() => reject(new Error('Request timed out')), 30000);
+                  });
+                  
+                  const emergencyPromise = mcpClient.callTool({
+                    name: 'get_historical_data',
+                    arguments: {
+                      instrument_token: parseInt(instrument_token),
+                      from_date: emergencyFrom,
+                      to_date: emergencyTo,
+                      interval: emergencyInterval
+                    }
+                  });
+                  
+                  return await Promise.race([emergencyPromise, timeoutPromise]);
+                });
+                
+                // Check if we got data
+                let hasEmergencyData = false;
+                if (emergencyResult?.content && Array.isArray(emergencyResult.content) && emergencyResult.content[0]?.text) {
+                  try {
+                    const parsed = JSON.parse(emergencyResult.content[0].text);
+                    hasEmergencyData = parsed?.candles?.length > 0 || 
+                                     parsed?.data?.candles?.length > 0 || 
+                                     (Array.isArray(parsed) && parsed.length > 0);
+                  } catch (e) {
+                    hasEmergencyData = Array.isArray(emergencyResult) && emergencyResult.length > 0;
+                  }
+                } else if (Array.isArray(emergencyResult)) {
+                  hasEmergencyData = emergencyResult.length > 0;
+                }
+                
+                if (hasEmergencyData && !emergencyResult?.isError) {
+                  console.log(`✅ Emergency fallback succeeded: ${daysBack} days with ${emergencyInterval}`);
+                  // Update result and used interval
+                  result = emergencyResult;
+                  usedInterval = emergencyInterval;
+                  from = emergencyFrom;
+                  to = emergencyTo;
+                  lastError = null; // Clear the error since we succeeded
+                  emergencySuccess = true;
+                  break rangeLoop; // Exit both loops
+                }
+              } catch (e) {
+                // Continue trying next emergency option
+                console.warn(`⚠️ Emergency fallback attempt failed for ${emergencyInterval}: ${e.message}`);
+                continue;
+              }
+            }
+          }
+          
+          if (!emergencySuccess) {
+            console.warn(`⚠️ All emergency fallback attempts failed`);
+          }
+        } catch (emergencyError) {
+          console.warn(`⚠️ Emergency fallback failed: ${emergencyError.message}`);
+        }
+      }
+      
+      // Final check: if we still don't have data after emergency fallback
+      if (!result || result?.isError || lastError) {
+        const allTriedFinal = intervalsToTry.join(', ');
+        const finalErrorFinal = lastError || 'Unknown error';
+        
+        console.error(`❌ All intervals AND emergency fallbacks failed. Tried: ${allTriedFinal}`);
+        console.error(`❌ Final error: ${finalErrorFinal}`);
+        
+        return res.status(400).json({
+          success: false,
+          error: 'Interval not supported',
+          message: `Unable to fetch historical data for intervals: ${allTriedFinal}. ${finalErrorFinal}`,
+          originalInterval: interval,
+          triedIntervals: intervalsToTry,
+          mcpError: finalErrorFinal,
+          suggestion: interval === '240minute' || interval === '4h' ? 'Try using 60minute, 1h, or day timeframe instead.' :
+                      interval === 'month' || interval === 'monthly' ? 'Try using day, week, or 1D timeframe instead.' :
+                      'Try a different timeframe or check if market data is available for this instrument. The date range might be too large.'
+        });
+      }
+    }
 
     console.log('📦 MCP Response structure:', JSON.stringify(result).substring(0, 200));
-
-    if (result?.isError || (result?.content && result.content[0]?.text?.includes('Failed'))) {
-      console.error('⚠️  MCP returned error or failed message');
-      const errorMessage = result?.content?.[0]?.text || 'Historical data not available';
-      console.error('Error content:', errorMessage);
-      console.error('Full MCP error result:', JSON.stringify(result, null, 2));
-      
-      // Check if it's an authorization error
-      const needsAuth = errorMessage.toLowerCase().includes('authorization') || 
-                        errorMessage.toLowerCase().includes('auth') ||
-                        errorMessage.toLowerCase().includes('login');
-      
-      return res.status(needsAuth ? 401 : 400).json({ 
-        success: false,
-        error: 'Data unavailable',
-        message: `Unable to fetch historical data: ${errorMessage}`,
-        instrument_token,
-        interval,
-        needsAuth,
-        mcpError: errorMessage
-      });
-    }
 
     // Parse MCP response - it might be in content[0].text as JSON string
     let parsedData = result;
@@ -615,12 +997,24 @@ app.get('/api/market/historical/:instrument_token', async (req, res) => {
     console.log('✅ Historical data fetched successfully');
     
     // Return in a consistent format
-    res.json({ 
+    const responseData = {
       success: true, 
       data: {
         candles: candles
       }
-    });
+    };
+    
+    // Add metadata if fallback interval was used
+    if (usedInterval !== interval) {
+      responseData.metadata = {
+        originalInterval: interval,
+        actualInterval: usedInterval,
+        note: 'Fallback interval used as original interval is not supported by MCP'
+      };
+      console.log(`ℹ️ Using fallback interval: ${interval} → ${usedInterval}`);
+    }
+    
+    res.json(responseData);
   } catch (error) {
     console.error('❌ Error fetching historical data:', error.message);
     console.error('Error stack:', error.stack);
@@ -716,21 +1110,24 @@ app.get('/api/instruments/search', async (req, res) => {
     const cleanQuery = q.trim().toUpperCase();
     console.log(`🔍 Searching instruments for: "${cleanQuery}"`);
     
-    const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('Search timed out')), 10000);
-    });
-    
     let result;
     try {
-      // Try the search with the original query
-      const searchPromise = mcpClient.callTool({
-        name: 'search_instruments',
-        arguments: {
-          query: cleanQuery
-        }
+      // Use safeMCPCall to handle session errors
+      result = await safeMCPCall(async () => {
+        const timeoutPromise = new Promise((_, reject) => {
+          setTimeout(() => reject(new Error('Search timed out')), 10000);
+        });
+        
+        // Try the search with the original query
+        const searchPromise = mcpClient.callTool({
+          name: 'search_instruments',
+          arguments: {
+            query: cleanQuery
+          }
+        });
+        
+        return await Promise.race([searchPromise, timeoutPromise]);
       });
-      
-      result = await Promise.race([searchPromise, timeoutPromise]);
     } catch (searchError) {
       console.error('⚠️  MCP search failed:', searchError.message);
       

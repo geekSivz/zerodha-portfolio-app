@@ -36,6 +36,7 @@ export default function CandlestickChart({ initialStock, onBack }) {
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [hasMoreData, setHasMoreData] = useState(true);
   const [oldestDataDate, setOldestDataDate] = useState(null);
+  const chartDataLengthRef = useRef(0); // Track candle count to check 250 limit
 
   // Stock selection states
   const [selectedStock, setSelectedStock] = useState(initialStock || null);
@@ -73,6 +74,7 @@ export default function CandlestickChart({ initialStock, onBack }) {
     if (initialStock) {
       setSelectedStock(initialStock);
       setChartData([]);
+      chartDataLengthRef.current = 0; // Reset ref
     }
   }, [initialStock]);
 
@@ -110,19 +112,30 @@ export default function CandlestickChart({ initialStock, onBack }) {
         
         if (response.ok) {
           const result = await response.json();
-          console.log('💰 Quote API response:', result);
           
-          if (result.data?.last_price) {
+          // Check if tool is unavailable - silently use latest candle close price
+          if (result.toolUnavailable || result.success === false && result.error?.includes('Tool not available')) {
+            // Tool is not available - use latest candle close price silently
+            // Don't log anything, just fall back to chart data
+            return;
+          }
+          
+          if (result.success && result.data?.last_price) {
             setLivePrice(result.data.last_price);
             console.log('✅ Updated live price:', result.data.last_price);
-          } else {
+          } else if (!result.toolUnavailable) {
+            // Only log if it's not a tool unavailable scenario
             console.warn('⚠️ No last_price in quote response');
           }
         } else {
           console.warn('⚠️ Quote API failed:', response.status);
         }
       } catch (error) {
-        console.warn('Could not fetch live price:', error.message);
+        // Silently handle errors - fall back to latest candle close price
+        // Don't spam console with errors for unavailable tool
+        if (!error.message?.includes('tool not found') && !error.message?.includes('Tool not available')) {
+          console.warn('Could not fetch live price:', error.message);
+        }
       }
     };
 
@@ -221,7 +234,6 @@ export default function CandlestickChart({ initialStock, onBack }) {
       else if (timeframe === '10minute') candleDurationMs = 10 * 60 * 1000;
       else if (timeframe === '15minute') candleDurationMs = 15 * 60 * 1000;
       else if (timeframe === '30minute') candleDurationMs = 30 * 60 * 1000;
-      else if (timeframe === '45minute') candleDurationMs = 45 * 60 * 1000;
       else if (timeframe === '60minute') candleDurationMs = 60 * 60 * 1000;
       else if (timeframe === '240minute') candleDurationMs = 240 * 60 * 1000;
       else if (timeframe === 'day') candleDurationMs = 24 * 60 * 60 * 1000;
@@ -263,7 +275,6 @@ export default function CandlestickChart({ initialStock, onBack }) {
     { value: '10minute', label: '10m', defaultDays: 5, maxDays: 10 },
     { value: '15minute', label: '15m', defaultDays: 7, maxDays: 15 },
     { value: '30minute', label: '30m', defaultDays: 10, maxDays: 30 },
-    { value: '45minute', label: '45m', defaultDays: 15, maxDays: 45 },
     { value: '60minute', label: '1h', defaultDays: 20, maxDays: 60 },
     { value: '240minute', label: '4h', defaultDays: 60, maxDays: 180 },
     { value: 'day', label: '1D', defaultDays: 100, maxDays: 365 },
@@ -322,8 +333,13 @@ export default function CandlestickChart({ initialStock, onBack }) {
         days: dataRange.days 
       });
 
+      // URL encode all parameters properly
+      const encodedInterval = encodeURIComponent(timeframe);
+      const encodedFrom = encodeURIComponent(from);
+      const encodedTo = encodeURIComponent(to);
+
       const response = await fetch(
-        `http://localhost:3001/api/market/historical/${selectedStock.instrument_token}?interval=${timeframe}&from=${from}&to=${to}`,
+        `http://localhost:3001/api/market/historical/${selectedStock.instrument_token}?interval=${encodedInterval}&from=${encodedFrom}&to=${encodedTo}`,
         { cache: 'no-store' } // Prevent caching for live updates
       );
 
@@ -366,7 +382,13 @@ export default function CandlestickChart({ initialStock, onBack }) {
         console.error('❌ Chart API error:', errorData);
         
         // If it's an authorization error, trigger the auth modal
-        if (errorData.needsAuth || errorData.error?.includes('authorization') || errorData.mcpError?.includes('authorization')) {
+        const errorMsg = (errorData.error || errorData.message || errorData.mcpError || '').toLowerCase();
+        if (errorData.needsAuth || 
+            errorData.error?.toLowerCase().includes('authorization') || 
+            errorData.mcpError?.toLowerCase().includes('authorization') ||
+            errorMsg.includes('log in') || errorMsg.includes('login') ||
+            errorMsg.includes('please log') || errorMsg.includes('login tool') ||
+            errorMsg.includes('unauthorized') || errorMsg.includes('auth')) {
           window.dispatchEvent(new Event('auth-error'));
           throw new Error('Authorization required. Please login to Zerodha.');
         }
@@ -443,19 +465,29 @@ export default function CandlestickChart({ initialStock, onBack }) {
         if (existingTime === newTime) {
           // Update the last candle (it's still forming)
           console.log('🔄 Updating forming candle:', latestNew);
-          setChartData(prev => [...prev.slice(0, -1), latestNew]);
+          setChartData(prev => {
+            const updated = [...prev.slice(0, -1), latestNew];
+            chartDataLengthRef.current = updated.length; // Update ref
+            return updated;
+          });
         } else if (newTime > existingTime) {
           // New candle has started, append it
           console.log('➕ New candle formed, appending:', latestNew);
-          setChartData(prev => [...prev, latestNew]);
+          setChartData(prev => {
+            const updated = [...prev, latestNew];
+            chartDataLengthRef.current = updated.length; // Update ref
+            return updated;
+          });
         } else {
           // Time went backwards or same, just replace all data
           console.log('🔄 Replacing all data');
           setChartData(formattedCandles);
+          chartDataLengthRef.current = formattedCandles.length; // Update ref
         }
       } else {
         // Initial load or manual refresh
         setChartData(formattedCandles);
+        chartDataLengthRef.current = formattedCandles.length; // Update ref
         if (formattedCandles.length > 0) {
           setOldestDataDate(new Date(formattedCandles[0].date));
         }
@@ -496,8 +528,13 @@ export default function CandlestickChart({ initialStock, onBack }) {
       const from = fromDate.toISOString().split('T')[0] + ' 00:00:00';
       const to = toDate.toISOString().split('T')[0] + ' 23:59:59';
 
+      // URL encode all parameters properly
+      const encodedInterval = encodeURIComponent(timeframe);
+      const encodedFrom = encodeURIComponent(from);
+      const encodedTo = encodeURIComponent(to);
+
       const response = await fetch(
-        `http://localhost:3001/api/market/historical/${selectedStock.instrument_token}?interval=${timeframe}&from=${from}&to=${to}`,
+        `http://localhost:3001/api/market/historical/${selectedStock.instrument_token}?interval=${encodedInterval}&from=${encodedFrom}&to=${encodedTo}`,
         { cache: 'no-store' }
       );
 
@@ -540,7 +577,9 @@ export default function CandlestickChart({ initialStock, onBack }) {
         const unique = combined.filter((candle, index, self) => 
           index === self.findIndex(c => new Date(c.date).getTime() === new Date(candle.date).getTime())
         );
-        return unique.sort((a, b) => new Date(a.date) - new Date(b.date));
+        const sorted = unique.sort((a, b) => new Date(a.date) - new Date(b.date));
+        chartDataLengthRef.current = sorted.length; // Update ref
+        return sorted;
       });
 
       console.log(`✅ Loaded ${newCandles.length} older candles`);
@@ -579,8 +618,13 @@ export default function CandlestickChart({ initialStock, onBack }) {
       const from = fromDate.toISOString().split('T')[0] + ' 00:00:00';
       const to = toDate.toISOString().split('T')[0] + ' 23:59:59';
 
+      // URL encode all parameters properly
+      const encodedInterval = encodeURIComponent(timeframe);
+      const encodedFrom = encodeURIComponent(from);
+      const encodedTo = encodeURIComponent(to);
+
       const response = await fetch(
-        `http://localhost:3001/api/market/historical/${selectedStock.instrument_token}?interval=${timeframe}&from=${from}&to=${to}`,
+        `http://localhost:3001/api/market/historical/${selectedStock.instrument_token}?interval=${encodedInterval}&from=${encodedFrom}&to=${encodedTo}`,
         { cache: 'no-store' }
       );
 
@@ -637,6 +681,7 @@ export default function CandlestickChart({ initialStock, onBack }) {
   };
 
   // Effect: Auto-refresh based on timeframe with live candle formation
+  // Stops auto-refresh once we have 250+ candles
   useEffect(() => {
     if (!selectedStock) return;
     
@@ -646,13 +691,13 @@ export default function CandlestickChart({ initialStock, onBack }) {
     setHasMoreData(true); // Reset infinite scroll state
     
     // Auto-refresh based on timeframe - AGGRESSIVE for live candle formation
+    // BUT: Stop auto-refresh once we have 250+ candles
     const refreshTime = timeframe === 'minute' ? 3000 :  // 3s for 1m (shows candle forming!)
                        timeframe === '3minute' ? 5000 :  // 5s for 3m
                        timeframe === '5minute' ? 8000 :  // 8s for 5m
                        timeframe === '10minute' ? 10000 : // 10s for 10m
                        timeframe === '15minute' ? 15000 : // 15s for 15m
                        timeframe === '30minute' ? 20000 : // 20s for 30m
-                       timeframe === '45minute' ? 25000 : // 25s for 45m
                        timeframe === '60minute' ? 30000 : // 30s for 1h
                        timeframe === '240minute' ? 60000 : // 60s for 4h
                        timeframe === 'day' ? 45000 :     // 45s for daily
@@ -662,11 +707,20 @@ export default function CandlestickChart({ initialStock, onBack }) {
     console.log(`🔄 Live candle refresh: ${refreshTime/1000}s for ${timeframe}`);
     
     const refreshInterval = setInterval(() => {
+      // Check if we have 250+ candles - if so, stop making API calls
+      // Use ref to get current value without causing re-renders
+      if (chartDataLengthRef.current >= 250) {
+        console.log(`⏹️ Stopping auto-refresh: Reached ${chartDataLengthRef.current} candles (limit: 250)`);
+        clearInterval(refreshInterval);
+        return;
+      }
+      
       console.log('🔴 LIVE UPDATE: Fetching latest candle data...');
       fetchChartData(true); // Silent refresh - updates current candle or appends new one
     }, refreshTime);
     
     return () => clearInterval(refreshInterval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [timeframe, dataRange.days, selectedStock?.instrument_token]);
 
   // Reset data range when timeframe changes
@@ -1222,38 +1276,218 @@ export default function CandlestickChart({ initialStock, onBack }) {
     return isLocalMaximum;
   };
 
-  // Get alternating BUY/SELL signals based on fresh logic
+  // Get alternating BUY/SELL signals based on swing trading logic
+  // After BUY: next SELL must be above BUY level (swing high)
+  // After SELL: next BUY must be below SELL level (swing low)
   const getAlternatingSignals = (data, minDistance = 10) => {
     if (!data || data.length < 3) return [];
     
     const signals = [];
     let lastSignalType = null;
     let lastSignalIndex = -1;
+    let lastSignalPrice = null;
     
-    for (let i = 1; i < data.length - 1; i++) {
-      const candle = data[i];
-      const isRedCandle = candle.close < candle.open; // Bearish/red candle
-      const isGreenCandle = candle.close >= candle.open; // Bullish/green candle
+    // First pass: detect all potential swing points for ALL candles
+    const swingLows = []; // Potential BUY signals
+    const swingHighs = []; // Potential SELL signals
+    
+    // Process ALL candles, including edge cases for older data
+    // Start from index 1 and go to data.length - 2 to allow for 3-candle comparison
+    // But try to include more edge candles by reducing lookback/lookahead requirements
+    for (let i = 0; i < data.length; i++) {
+      // For edge candles (first 2 and last 2), use relaxed detection
+      if (i < 2 || i >= data.length - 2) {
+        // Edge case: check with available neighbors
+        if (i > 0 && i < data.length - 1) {
+          const candle = data[i];
+          const prevCandle = data[i - 1];
+          const nextCandle = data[i + 1];
+          const isRedCandle = candle.close < candle.open;
+          
+          // Relaxed BUY detection for edge candles
+          // Check if it's a local minimum with available neighbors
+          const isLowest = (i === 0 || prevCandle.low >= candle.low) && 
+                           (i === data.length - 1 || nextCandle.low >= candle.low);
+          if (isLowest && i < data.length - 1 && i > 0) {
+            // Check it's lower than neighbors if available
+            let isLocalMin = true;
+            for (let j = Math.max(0, i - 1); j <= Math.min(data.length - 1, i + 1); j++) {
+              if (j !== i && data[j].low < candle.low) {
+                isLocalMin = false;
+                break;
+              }
+            }
+            if (isLocalMin) {
+              swingLows.push({ 
+                index: i, 
+                price: data[i].low, 
+                date: data[i].date, 
+                isRedCandle: candle.close < candle.open 
+              });
+            }
+          }
+          
+          // Relaxed SELL detection for edge candles
+          const isHighest = (i === 0 || prevCandle.high <= candle.high) && 
+                            (i === data.length - 1 || nextCandle.high <= candle.high);
+          if (isHighest && isRedCandle && i < data.length - 1 && i > 0) {
+            // Check it's higher than neighbors if available
+            let isLocalMax = true;
+            for (let j = Math.max(0, i - 1); j <= Math.min(data.length - 1, i + 1); j++) {
+              if (j !== i && data[j].high > candle.high) {
+                isLocalMax = false;
+                break;
+              }
+            }
+            if (isLocalMax) {
+              swingHighs.push({ 
+                index: i, 
+                price: data[i].high, 
+                date: data[i].date, 
+                isRedCandle: isRedCandle 
+              });
+            }
+          }
+        }
+      } else {
+        // Normal detection for middle candles (has full neighbors)
+        const candle = data[i];
+        const isRedCandle = candle.close < candle.open;
+        
+        // Detect potential BUY signals (swing lows) - full detection
+        if (detectBuySignal(data, i)) {
+          swingLows.push({ 
+            index: i, 
+            price: data[i].low, 
+            date: data[i].date, 
+            isRedCandle: candle.close < candle.open 
+          });
+        }
+        
+        // Detect potential SELL signals (swing highs) - full detection
+        if (detectSellSignal(data, i) && isRedCandle) {
+          swingHighs.push({ 
+            index: i, 
+            price: data[i].high, 
+            date: data[i].date, 
+            isRedCandle: isRedCandle 
+          });
+        }
+      }
+    }
+    
+    // Second pass: select signals based on swing trading rules
+    let swingLowIdx = 0;
+    let swingHighIdx = 0;
+    
+    while (swingLowIdx < swingLows.length || swingHighIdx < swingHighs.length) {
+      const nextLow = swingLows[swingLowIdx];
+      const nextHigh = swingHighs[swingHighIdx];
       
-      // Check for BUY signal: candle's low is NOT broken by adjacent candles
-      const isBuy = detectBuySignal(data, i);
-      // Check for SELL signal: candle's high is NOT broken by adjacent candles
-      // SELL signals should only appear on red (bearish) candles
-      const isSell = detectSellSignal(data, i) && isRedCandle;
+      // If no last signal, start with first available signal
+      if (lastSignalType === null) {
+        // Start with whichever comes first (BUY or SELL)
+        if (nextLow && nextHigh) {
+          if (nextLow.index < nextHigh.index) {
+            // Start with BUY
+            signals.push({ ...nextLow, type: 'BUY' });
+            lastSignalType = 'BUY';
+            lastSignalIndex = nextLow.index;
+            lastSignalPrice = nextLow.price;
+            swingLowIdx++;
+          } else {
+            // Start with SELL
+            signals.push({ ...nextHigh, type: 'SELL' });
+            lastSignalType = 'SELL';
+            lastSignalIndex = nextHigh.index;
+            lastSignalPrice = nextHigh.price;
+            swingHighIdx++;
+          }
+        } else if (nextLow) {
+          // Only BUY available
+          signals.push({ ...nextLow, type: 'BUY' });
+          lastSignalType = 'BUY';
+          lastSignalIndex = nextLow.index;
+          lastSignalPrice = nextLow.price;
+          swingLowIdx++;
+        } else if (nextHigh) {
+          // Only SELL available
+          signals.push({ ...nextHigh, type: 'SELL' });
+          lastSignalType = 'SELL';
+          lastSignalIndex = nextHigh.index;
+          lastSignalPrice = nextHigh.price;
+          swingHighIdx++;
+        }
+        continue;
+      }
       
-      // Check if we have minimum distance from last signal
-      const hasMinDistance = lastSignalIndex === -1 || (i - lastSignalIndex) >= minDistance;
-      
-      // Only add signal if it alternates with the last one AND has minimum distance
-      if (isBuy && lastSignalType !== 'BUY' && hasMinDistance) {
-        signals.push({ index: i, type: 'BUY', price: data[i].low, date: data[i].date, isRedCandle: isRedCandle });
-        lastSignalType = 'BUY';
-        lastSignalIndex = i;
-      } else if (isSell && lastSignalType !== 'SELL' && hasMinDistance) {
-        // SELL signals only on red candles - positioned at the top (high) of the red candle
-        signals.push({ index: i, type: 'SELL', price: data[i].high, date: data[i].date, isRedCandle: isRedCandle });
-        lastSignalType = 'SELL';
-        lastSignalIndex = i;
+      // After BUY signal: find next SELL (swing high) that is ABOVE the BUY level
+      if (lastSignalType === 'BUY') {
+        // Find next swing high that is above the last BUY price
+        let foundSell = null;
+        while (swingHighIdx < swingHighs.length) {
+          const candidateHigh = swingHighs[swingHighIdx];
+          
+          // Check minimum distance
+          if (candidateHigh.index - lastSignalIndex < minDistance) {
+            swingHighIdx++;
+            continue;
+          }
+          
+          // SELL must be ABOVE the BUY level (swing high above swing low)
+          if (candidateHigh.price > lastSignalPrice) {
+            foundSell = candidateHigh;
+            break;
+          }
+          
+          // If this swing high is below or equal to BUY level, skip it and continue
+          swingHighIdx++;
+        }
+        
+        if (foundSell) {
+          signals.push({ ...foundSell, type: 'SELL' });
+          lastSignalType = 'SELL';
+          lastSignalIndex = foundSell.index;
+          lastSignalPrice = foundSell.price;
+          swingHighIdx++;
+        } else {
+          // No valid SELL found above BUY level, stop here
+          break;
+        }
+      }
+      // After SELL signal: find next BUY (swing low) that is BELOW the SELL level
+      else if (lastSignalType === 'SELL') {
+        // Find next swing low that is below the last SELL price
+        let foundBuy = null;
+        while (swingLowIdx < swingLows.length) {
+          const candidateLow = swingLows[swingLowIdx];
+          
+          // Check minimum distance
+          if (candidateLow.index - lastSignalIndex < minDistance) {
+            swingLowIdx++;
+            continue;
+          }
+          
+          // BUY must be BELOW the SELL level (swing low below swing high)
+          if (candidateLow.price < lastSignalPrice) {
+            foundBuy = candidateLow;
+            break;
+          }
+          
+          // If this swing low is above or equal to SELL level, skip it and continue
+          swingLowIdx++;
+        }
+        
+        if (foundBuy) {
+          signals.push({ ...foundBuy, type: 'BUY' });
+          lastSignalType = 'BUY';
+          lastSignalIndex = foundBuy.index;
+          lastSignalPrice = foundBuy.price;
+          swingLowIdx++;
+        } else {
+          // No valid BUY found below SELL level, stop here
+          break;
+        }
       }
     }
     
@@ -1837,6 +2071,111 @@ export default function CandlestickChart({ initialStock, onBack }) {
     setTimeout(() => setIsClickingSignal(false), 100);
   };
 
+  // Detect Higher Highs (HH) and Lower Lows (LL) from all candles
+  const detectHigherHighsAndLowerLows = (data) => {
+    if (!data || data.length < 5) return { hh: [], ll: [], support: null, resistance: null };
+    
+    const hh = []; // Higher Highs: high is higher than previous high and next high
+    const ll = []; // Lower Lows: low is lower than previous low and next low
+    
+    // Detect HH and LL patterns
+    // Need at least 3 candles to compare: prev, current, next
+    for (let i = 2; i < data.length - 2; i++) {
+      const current = data[i];
+      const prev = data[i - 1];
+      const next = data[i + 1];
+      
+      // Check for Higher High (HH): current high is higher than both prev and next
+      if (current.high > prev.high && current.high > next.high) {
+        // Also check it's higher than surrounding candles (wider range)
+        let isHH = true;
+        for (let j = Math.max(0, i - 3); j <= Math.min(data.length - 1, i + 3); j++) {
+          if (j !== i && data[j].high >= current.high) {
+            isHH = false;
+            break;
+          }
+        }
+        if (isHH) {
+          hh.push({
+            index: i,
+            price: current.high,
+            date: current.date
+          });
+        }
+      }
+      
+      // Check for Lower Low (LL): current low is lower than both prev and next
+      if (current.low < prev.low && current.low < next.low) {
+        // Also check it's lower than surrounding candles (wider range)
+        let isLL = true;
+        for (let j = Math.max(0, i - 3); j <= Math.min(data.length - 1, i + 3); j++) {
+          if (j !== i && data[j].low <= current.low) {
+            isLL = false;
+            break;
+          }
+        }
+        if (isLL) {
+          ll.push({
+            index: i,
+            price: current.low,
+            date: current.date
+          });
+        }
+      }
+    }
+    
+    // Calculate Support and Resistance lines
+    // Support: line connecting the most significant lower lows
+    // Resistance: line connecting the most significant higher highs
+    
+    let support = null;
+    let resistance = null;
+    
+    if (ll.length >= 2) {
+      // Take the 2 most recent lower lows for support line
+      const recentLL = ll.slice(-2);
+      const x1 = recentLL[0].index;
+      const y1 = recentLL[0].price;
+      const x2 = recentLL[1].index;
+      const y2 = recentLL[1].price;
+      
+      // Calculate slope and intercept for support line
+      const slope = (y2 - y1) / (x2 - x1);
+      const intercept = y1 - slope * x1;
+      
+      support = {
+        slope,
+        intercept,
+        points: recentLL,
+        startIndex: Math.min(x1, x2),
+        endIndex: data.length - 1
+      };
+    }
+    
+    if (hh.length >= 2) {
+      // Take the 2 most recent higher highs for resistance line
+      const recentHH = hh.slice(-2);
+      const x1 = recentHH[0].index;
+      const y1 = recentHH[0].price;
+      const x2 = recentHH[1].index;
+      const y2 = recentHH[1].price;
+      
+      // Calculate slope and intercept for resistance line
+      const slope = (y2 - y1) / (x2 - x1);
+      const intercept = y1 - slope * x1;
+      
+      resistance = {
+        slope,
+        intercept,
+        points: recentHH,
+        startIndex: Math.min(x1, x2),
+        endIndex: data.length - 1
+      };
+    }
+    
+    return { hh, ll, support, resistance };
+  };
+
   // Calculate price channel (upper, lower, and mid lines) for current view
   const calculatePriceChannel = (data, startIdx) => {
     if (data.length < 10) return null;
@@ -2202,6 +2541,203 @@ export default function CandlestickChart({ initialStock, onBack }) {
             </g>
           );
         })}
+
+        {/* Support/Resistance Lines and HH/LL Markers - Only when all candles are loaded */}
+        {chartType === 'candlestick' && chartData.length >= 10 && (() => {
+          const hhll = detectHigherHighsAndLowerLows(chartData);
+          
+          return (
+            <g>
+              {/* Support Line */}
+              {hhll.support && (() => {
+                const support = hhll.support;
+                // Calculate support line points for visible range
+                const startVisible = Math.max(support.startIndex, startIndex);
+                const endVisible = Math.min(support.endIndex, endIndex);
+                if (startVisible >= endVisible) return null;
+                
+                const supportPoints = [];
+                for (let i = startVisible; i <= endVisible; i++) {
+                  const visibleIdx = i - startIndex;
+                  if (visibleIdx >= 0 && visibleIdx < visibleData.length) {
+                    const price = support.slope * i + support.intercept;
+                    const x = scaleX(visibleIdx) + candleWidth / 2;
+                    const y = scaleY(price);
+                    supportPoints.push(`${x},${y}`);
+                  }
+                }
+                
+                if (supportPoints.length < 2) return null;
+                
+                return (
+                  <g key="support-line">
+                    <polyline
+                      points={supportPoints.join(' ')}
+                      fill="none"
+                      stroke="#10b981"
+                      strokeWidth="2.5"
+                      strokeDasharray="8 4"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      opacity="0.85"
+                    />
+                    {/* Support label */}
+                    <text
+                      x={scaleX(Math.min(endVisible - startIndex, visibleData.length - 1)) + candleWidth / 2 + 5}
+                      y={scaleY(support.slope * endVisible + support.intercept) + 4}
+                      fontSize="11"
+                      fill="#10b981"
+                      fontWeight="700"
+                      fontFamily="Poppins, sans-serif"
+                    >
+                      SUPPORT
+                    </text>
+                  </g>
+                );
+              })()}
+              
+              {/* Resistance Line */}
+              {hhll.resistance && (() => {
+                const resistance = hhll.resistance;
+                // Calculate resistance line points for visible range
+                const startVisible = Math.max(resistance.startIndex, startIndex);
+                const endVisible = Math.min(resistance.endIndex, endIndex);
+                if (startVisible >= endVisible) return null;
+                
+                const resistancePoints = [];
+                for (let i = startVisible; i <= endVisible; i++) {
+                  const visibleIdx = i - startIndex;
+                  if (visibleIdx >= 0 && visibleIdx < visibleData.length) {
+                    const price = resistance.slope * i + resistance.intercept;
+                    const x = scaleX(visibleIdx) + candleWidth / 2;
+                    const y = scaleY(price);
+                    resistancePoints.push(`${x},${y}`);
+                  }
+                }
+                
+                if (resistancePoints.length < 2) return null;
+                
+                return (
+                  <g key="resistance-line">
+                    <polyline
+                      points={resistancePoints.join(' ')}
+                      fill="none"
+                      stroke="#ef4444"
+                      strokeWidth="2.5"
+                      strokeDasharray="8 4"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      opacity="0.85"
+                    />
+                    {/* Resistance label */}
+                    <text
+                      x={scaleX(Math.min(endVisible - startIndex, visibleData.length - 1)) + candleWidth / 2 + 5}
+                      y={scaleY(resistance.slope * endVisible + resistance.intercept) - 5}
+                      fontSize="11"
+                      fill="#ef4444"
+                      fontWeight="700"
+                      fontFamily="Poppins, sans-serif"
+                    >
+                      RESISTANCE
+                    </text>
+                  </g>
+                );
+              })()}
+              
+              {/* Higher High (HH) Markers */}
+              {hhll.hh.map((hhPoint) => {
+                const visibleIdx = hhPoint.index - startIndex;
+                if (visibleIdx < 0 || visibleIdx >= visibleData.length) return null;
+                
+                const x = scaleX(visibleIdx) + candleWidth / 2;
+                const y = scaleY(hhPoint.price);
+                
+                return (
+                  <g key={`hh-${hhPoint.index}`}>
+                    {/* HH marker dot */}
+                    <circle
+                      cx={x}
+                      cy={y}
+                      r="5"
+                      fill="#ef4444"
+                      stroke="white"
+                      strokeWidth="2"
+                      opacity="0.9"
+                    />
+                    {/* HH label */}
+                    <rect
+                      x={x - 12}
+                      y={y - 20}
+                      width="24"
+                      height="14"
+                      fill="#ef4444"
+                      rx="2"
+                      opacity="0.95"
+                    />
+                    <text
+                      x={x}
+                      y={y - 13}
+                      fontSize="9"
+                      fill="white"
+                      fontWeight="bold"
+                      textAnchor="middle"
+                      dominantBaseline="middle"
+                      fontFamily="Poppins, sans-serif"
+                    >
+                      HH
+                    </text>
+                  </g>
+                );
+              })}
+              
+              {/* Lower Low (LL) Markers */}
+              {hhll.ll.map((llPoint) => {
+                const visibleIdx = llPoint.index - startIndex;
+                if (visibleIdx < 0 || visibleIdx >= visibleData.length) return null;
+                
+                const x = scaleX(visibleIdx) + candleWidth / 2;
+                const y = scaleY(llPoint.price);
+                
+                return (
+                  <g key={`ll-${llPoint.index}`}>
+                    {/* LL marker dot */}
+                    <circle
+                      cx={x}
+                      cy={y}
+                      r="5"
+                      fill="#10b981"
+                      stroke="white"
+                      strokeWidth="2"
+                      opacity="0.9"
+                    />
+                    {/* LL label */}
+                    <rect
+                      x={x - 12}
+                      y={y + 6}
+                      width="24"
+                      height="14"
+                      fill="#10b981"
+                      rx="2"
+                      opacity="0.95"
+                    />
+                    <text
+                      x={x}
+                      y={y + 13}
+                      fontSize="9"
+                      fill="white"
+                      fontWeight="bold"
+                      textAnchor="middle"
+                      dominantBaseline="middle"
+                      fontFamily="Poppins, sans-serif"
+                    >
+                      LL
+                    </text>
+                  </g>
+                );
+              })}
+            </g>
+          );
+        })()}
 
         {/* Alternating BUY/SELL Signals */}
         {(() => {
@@ -2969,6 +3505,7 @@ export default function CandlestickChart({ initialStock, onBack }) {
                       setStockSearch('');
                       setSearchResults([]);
                       setChartData([]);
+                      chartDataLengthRef.current = 0; // Reset ref
                     }}
                     className={`w-full text-left px-4 py-3 hover:bg-blue-50 transition-colors border-b border-gray-100 ${
                       selectedStock?.instrument_token === instrument.instrument_token ? 'bg-blue-100' : ''
